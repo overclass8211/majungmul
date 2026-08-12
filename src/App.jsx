@@ -3,7 +3,8 @@ import {
   Droplet, Droplets, Users, Map, Film, Send, Inbox, Menu, X, Plus,
   Trash2, Lock, Unlock, CheckCircle2, Clock, Loader2, Music, Phone,
   MapPin, CalendarDays, Church, Camera, PlayCircle, Heart, ChevronRight,
-  Waves, Shield, Image as ImageIcon,
+  Waves, Shield, Image as ImageIcon, Play, Pause, SkipForward, SkipBack,
+  ListMusic, ChevronUp, ChevronDown,
 } from "lucide-react";
 
 /* ============================================================
@@ -816,6 +817,175 @@ function BoardPage({ isAdmin }) {
 }
 
 /* ============================================================
+   워십 플레이어 — 하단 고정 미디어 플레이어
+   ------------------------------------------------------------
+   - YouTube 공식 IFrame 플레이어로 재생 (저작권 준수:
+     조회수/광고 수익이 원저작자에게 귀속, 음원 재호스팅 없음)
+   - 곡이 끝나면 자동으로 다음 곡 재생
+   - 관리자: 공식 채널 영상 URL로 곡 추가/삭제
+   - 임베드가 금지된 영상은 유튜브가 자체적으로 재생을 차단함
+   ============================================================ */
+function WorshipPlayer({ isAdmin }) {
+  const [list, setList] = useState([]);
+  const [idx, setIdx] = useState(0);
+  const [started, setStarted] = useState(false); // 사용자가 재생을 눌렀는가
+  const [paused, setPaused] = useState(false);
+  const [open, setOpen] = useState(false);       // 목록/영상 패널 펼침
+  const [form, setForm] = useState({ title: "", url: "" });
+  const mountRef = useRef(null);  // YT 플레이어가 붙을 div
+  const ytRef = useRef(null);     // YT.Player 인스턴스
+  const stateRef = useRef({ list: [], idx: 0 }); // 이벤트 콜백용 최신값
+
+  useEffect(() => { loadCol("playlist").then(setList); }, [isAdmin]);
+  useEffect(() => { stateRef.current = { list, idx }; }, [list, idx]);
+
+  /* YouTube IFrame API 스크립트 1회 로드 */
+  useEffect(() => {
+    if (window.YT?.Player || document.getElementById("yt-api")) return;
+    const s = document.createElement("script");
+    s.id = "yt-api";
+    s.src = "https://www.youtube.com/iframe_api";
+    document.body.appendChild(s);
+  }, []);
+
+  const playIndex = (i) => {
+    const { list: l } = stateRef.current;
+    if (!l.length) return;
+    const safe = ((i % l.length) + l.length) % l.length; // 순환 재생
+    setIdx(safe);
+    setStarted(true);
+    setPaused(false);
+    setOpen(true);
+  };
+  const next = () => playIndex(stateRef.current.idx + 1);
+  const prev = () => playIndex(stateRef.current.idx - 1);
+
+  /* 재생 시작/곡 변경 시 플레이어 생성 또는 영상 교체 */
+  useEffect(() => {
+    if (!started || !list[idx]) return;
+    const videoId = youtubeId(list[idx].url);
+    if (!videoId) return;
+
+    const mount = () => {
+      if (ytRef.current) {
+        ytRef.current.loadVideoById(videoId);
+        return;
+      }
+      ytRef.current = new window.YT.Player(mountRef.current, {
+        videoId,
+        playerVars: { autoplay: 1, rel: 0, playsinline: 1 },
+        events: {
+          onStateChange: (e) => {
+            if (e.data === window.YT.PlayerState.ENDED) next();     // 자동 다음곡
+            if (e.data === window.YT.PlayerState.PAUSED) setPaused(true);
+            if (e.data === window.YT.PlayerState.PLAYING) setPaused(false);
+          },
+        },
+      });
+    };
+    if (window.YT?.Player) mount();
+    else window.onYouTubeIframeAPIReady = mount;
+  }, [started, idx]);
+
+  const togglePause = () => {
+    if (!ytRef.current) return;
+    paused ? ytRef.current.playVideo() : ytRef.current.pauseVideo();
+  };
+
+  /* ---------- 관리자: 곡 추가/삭제 ---------- */
+  const addTrack = async () => {
+    if (!form.title.trim()) return alert("곡 제목을 입력해 주세요.");
+    if (!youtubeId(form.url)) return alert("올바른 YouTube 링크를 입력해 주세요.");
+    const nextList = [...list, { id: Date.now(), title: form.title.trim(), url: form.url.trim() }];
+    setList(nextList);
+    await saveCol("playlist", nextList);
+    setForm({ title: "", url: "" });
+  };
+  const removeTrack = async (id) => {
+    if (!confirm("이 곡을 목록에서 삭제할까요?")) return;
+    const i = list.findIndex((t) => t.id === id);
+    const nextList = list.filter((t) => t.id !== id);
+    setList(nextList);
+    await saveCol("playlist", nextList);
+    if (i <= idx && idx > 0) setIdx(idx - 1); // 현재곡 앞이 지워지면 인덱스 보정
+  };
+
+  /* 곡이 없고 관리자도 아니면 플레이어 숨김 */
+  if (!list.length && !isAdmin) return null;
+  const current = list[idx];
+
+  return (
+    <div className={`player ${open ? "open" : ""}`}>
+      {/* ── 펼침 패널: 영상 + 재생목록 ── */}
+      {open && (
+        <div className="player-panel">
+          <div className="player-video">
+            {started && current ? (
+              <div ref={mountRef} />
+            ) : (
+              <div className="player-video-empty">
+                <ListMusic size={26} strokeWidth={1.4} />
+                <p>{list.length ? "재생 버튼을 눌러 워십을 시작하세요" : "관리자가 곡을 추가하면 재생됩니다"}</p>
+              </div>
+            )}
+          </div>
+
+          <div className="player-list">
+            <b className="player-list-title"><ListMusic size={14} /> 워십 재생목록 ({list.length})</b>
+            {list.map((t, i) => (
+              <div key={t.id} className={`player-track ${i === idx && started ? "on" : ""}`}>
+                <button className="player-track-main" onClick={() => playIndex(i)}>
+                  <Play size={12} /> <span>{t.title}</span>
+                </button>
+                {isAdmin && (
+                  <button className="icon-del static" onClick={() => removeTrack(t.id)}>
+                    <Trash2 size={13} />
+                  </button>
+                )}
+              </div>
+            ))}
+
+            {isAdmin && (
+              <div className="player-add">
+                <input placeholder="곡 제목 (예: 은혜 아니면 — 마커스워십)" value={form.title}
+                  onChange={(e) => setForm({ ...form, title: e.target.value })} />
+                <input placeholder="YouTube 링크 (공식 채널 권장)" value={form.url}
+                  onChange={(e) => setForm({ ...form, url: e.target.value })} />
+                <button className="btn primary small" onClick={addTrack}><Plus size={14} /> 곡 추가</button>
+                <p className="player-hint">
+                  <Shield size={12} /> 공식 채널(마커스워십·어노인팅·제이어스·WELOVE 등) 영상을 사용하세요.
+                  YouTube 공식 플레이어로 재생되어 원저작자에게 수익이 귀속됩니다.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── 하단 컨트롤 바 ── */}
+      <div className="player-bar">
+        <span className="player-disc"><Music size={15} /></span>
+        <div className="player-now">
+          <b>{current ? current.title : "워십 플레이어"}</b>
+          <span>{started ? "지금 흐르는 찬양" : "예배의 마중물이 되는 찬양"}</span>
+        </div>
+        <div className="player-ctrl">
+          <button onClick={prev} disabled={!list.length} title="이전 곡"><SkipBack size={17} /></button>
+          <button className="player-play" disabled={!list.length} title={started && !paused ? "일시정지" : "재생"}
+            onClick={() => (started ? togglePause() : playIndex(idx))}>
+            {started && !paused ? <Pause size={18} /> : <Play size={18} />}
+          </button>
+          <button onClick={next} disabled={!list.length} title="다음 곡"><SkipForward size={17} /></button>
+        </div>
+        <button className="player-toggle" onClick={() => setOpen(!open)} title="재생목록">
+          {open ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    앱 셸 — 내비게이션 / 관리자 로그인 / 라우팅
    ============================================================ */
 const MENUS = [
@@ -908,6 +1078,9 @@ export default function App() {
         {page === "request" && <RequestPage go={go} />}
         {page === "board" && <BoardPage isAdmin={isAdmin} />}
       </main>
+
+      {/* ── 워십 플레이어 (모든 페이지에서 유지) ── */}
+      <WorshipPlayer isAdmin={isAdmin} />
 
       {/* ── 푸터 ── */}
       <footer className="footer">
@@ -1237,8 +1410,69 @@ label svg { vertical-align: -2px; margin-right: 2px; }
 .footer p { font-size: 0.82rem; }
 .footer small { display: block; margin-top: 14px; font-size: 0.72rem; color: #6E8AA3; }
 
+/* ── 워십 플레이어 ── */
+.player {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+  background: var(--ink); color: #fff;
+  box-shadow: 0 -8px 30px rgba(20,48,74,0.3);
+}
+.player-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px; max-width: 1020px; margin: 0 auto;
+}
+.player-disc {
+  width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+  display: grid; place-items: center;
+  background: linear-gradient(150deg, var(--water), var(--tide));
+}
+.player-now { flex: 1; min-width: 0; }
+.player-now b { display: block; font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.player-now span { font-size: 0.7rem; color: #9CC8E8; }
+.player-ctrl { display: flex; align-items: center; gap: 4px; }
+.player-ctrl button {
+  width: 36px; height: 36px; border-radius: 50%;
+  display: grid; place-items: center; color: #C6DCEE;
+}
+.player-ctrl button:hover { background: rgba(255,255,255,0.1); }
+.player-ctrl button:disabled { opacity: 0.35; cursor: default; }
+.player-play { background: #fff !important; color: var(--ink) !important; }
+.player-toggle { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: #9CC8E8; }
+.player-panel {
+  max-width: 1020px; margin: 0 auto; padding: 16px 16px 4px;
+  display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.player-video { position: relative; padding-top: 38%; background: #0D2135; border-radius: 12px; overflow: hidden; }
+.player-video > div, .player-video iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.player-video-empty {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px; color: #6E8AA3; font-size: 0.82rem;
+}
+.player-list { max-height: 260px; overflow-y: auto; padding-right: 4px; }
+.player-list-title { display: flex; align-items: center; gap: 6px; font-size: 0.76rem; letter-spacing: 0.08em; color: #9CC8E8; margin-bottom: 8px; }
+.player-track { display: flex; align-items: center; gap: 6px; border-radius: 8px; }
+.player-track.on { background: rgba(62,134,192,0.25); }
+.player-track-main {
+  flex: 1; display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; font-size: 0.84rem; color: #E4EFF8; text-align: left; min-width: 0;
+}
+.player-track-main span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.player-track-main:hover { color: #fff; }
+.player-track .icon-del { background: rgba(255,255,255,0.08); color: #E8A8A8; }
+.player-add { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.15); }
+.player-add input { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.15); color: #fff; font-size: 0.82rem; }
+.player-add input::placeholder { color: #7C99B4; }
+.player-hint { display: flex; gap: 6px; font-size: 0.7rem; color: #7C99B4; line-height: 1.5; }
+.player-hint svg { flex-shrink: 0; margin-top: 2px; }
+
+/* 플레이어 바에 가려지지 않도록 본문 하단 여백 */
+main { padding-bottom: 76px; }
+.footer { padding-bottom: 90px; }
+
 /* ── 반응형 ── */
 @media (max-width: 860px) {
+  .player-panel { grid-template-columns: 1fr; }
+  .player-video { padding-top: 56.25%; }
   .cards3 { grid-template-columns: 1fr; }
   .cards2 { grid-template-columns: 1fr; }
   .donate { grid-template-columns: 1fr; }

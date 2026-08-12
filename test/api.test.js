@@ -134,3 +134,75 @@ test("7. 허용되지 않은 컬렉션은 404를 반환한다", async () => {
   const r = await fetch(BASE + "/api/data/hacked");
   assert.equal(r.status, 404);
 });
+
+test("8. playlist 컬렉션: 공개 조회 가능, 관리자만 저장 가능", async () => {
+  /* 공개 조회 */
+  const pub = await fetch(BASE + "/api/data/playlist");
+  assert.equal(pub.status, 200);
+  assert.deepEqual(await pub.json(), []);
+
+  /* 무권한 저장 차단 */
+  const denied = await fetch(BASE + "/api/data/playlist", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify([{ id: 1, title: "test", url: "https://youtu.be/abcdefghijk" }]),
+  });
+  assert.equal(denied.status, 403);
+
+  /* 관리자 저장 → 재조회 시 데이터 무결성 확인 */
+  const h = { "Content-Type": "application/json", "x-admin-token": globalThis.__token };
+  const put = await fetch(BASE + "/api/data/playlist", {
+    method: "PUT", headers: h,
+    body: JSON.stringify([{ id: 1, title: "은혜 아니면", url: "https://youtu.be/abcdefghijk" }]),
+  });
+  assert.equal(put.status, 200);
+  const saved = await (await fetch(BASE + "/api/data/playlist")).json();
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].title, "은혜 아니면");
+});
+
+test("9. 배포 웹훅: 시크릿 미설정 시 503, 잘못된 서명은 401", async () => {
+  /* 테스트 서버는 DEPLOY_SECRET 없이 기동됨 → 503 */
+  const off = await fetch(BASE + "/api/deploy/webhook", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(off.status, 503);
+});
+
+test("10. 배포 웹훅: 시크릿 설정 시 서명 검증이 동작한다", async () => {
+  /* 시크릿을 설정한 별도 서버로 검증 (포트 3198) */
+  const { spawn } = require("node:child_process");
+  const crypto = require("node:crypto");
+  const SECRET = "hook-secret-test";
+  const p = spawn("node", ["server.js"], {
+    env: { ...process.env, PORT: 3198, ADMIN_PASSWORD: "x", DATA_DIR: tmpData, DEPLOY_SECRET: SECRET },
+    stdio: "ignore",
+  });
+  try {
+    for (let i = 0; i < 30; i++) {
+      try { if ((await fetch("http://127.0.0.1:3198/")).ok) break; } catch {}
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    /* 잘못된 서명 → 401 */
+    const bad = await fetch("http://127.0.0.1:3198/api/deploy/webhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-hub-signature-256": "sha256=" + "0".repeat(64) },
+      body: "{}",
+    });
+    assert.equal(bad.status, 401);
+
+    /* 올바른 서명 → 200 (배포 시작 응답) */
+    const body = JSON.stringify({ ref: "refs/heads/main" });
+    const sig = "sha256=" + crypto.createHmac("sha256", SECRET).update(body).digest("hex");
+    const ok = await fetch("http://127.0.0.1:3198/api/deploy/webhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-hub-signature-256": sig },
+      body,
+    });
+    assert.equal(ok.status, 200);
+  } finally {
+    p.kill();
+  }
+});

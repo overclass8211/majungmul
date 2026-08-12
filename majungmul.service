@@ -19,6 +19,8 @@ RestartSec=5
 # ▼ 포트와 관리자 비밀번호 (반드시 변경!)
 Environment=PORT=3100
 Environment=ADMIN_PASSWORD=majungmul!
+# ▼ 자동배포용 시크릿 — GitHub 웹훅 설정의 Secret과 동일하게 (미설정 시 자동배포 꺼짐)
+Environment=DEPLOY_SECRET=
 
 [Install]
 WantedBy=multi-user.target

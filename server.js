@@ -15,12 +15,66 @@ const crypto = require("crypto");
 
 const PORT = process.env.PORT || 3100;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "majungmul!"; // 배포 후 반드시 변경
+const DEPLOY_SECRET = process.env.DEPLOY_SECRET || ""; // 설정 시 자동배포 웹훅 활성화
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 
 /* 허용된 컬렉션만 파일로 저장 (임의 경로 접근 차단) */
-const COLLECTIONS = ["members", "journey", "contents", "requests"];
+const COLLECTIONS = ["members", "journey", "contents", "requests", "playlist"];
 
 const app = express();
+
+/* ============================================================
+ * 자동배포 웹훅 (GitHub → 이 서버)
+ * ------------------------------------------------------------
+ * 흐름: GitHub push 발생 → 이 엔드포인트 호출(HMAC 서명 검증)
+ *       → git pull → npm test → 전부 통과 시 프로세스 종료
+ *       → systemd(Restart=always)가 새 코드로 자동 재기동
+ *       → 테스트 실패 시 기존 버전 유지 (안전장치)
+ * 주의: express.json 보다 먼저 등록해야 원본 바디로 서명 검증 가능
+ * ============================================================ */
+const { execFile } = require("child_process");
+let deploying = false; // 중복 배포 방지
+
+app.post(
+  "/api/deploy/webhook",
+  express.raw({ type: "*/*", limit: "2mb" }),
+  (req, res) => {
+    if (!DEPLOY_SECRET)
+      return res.status(503).json({ error: "자동배포가 설정되지 않았습니다. (DEPLOY_SECRET 미설정)" });
+
+    /* GitHub HMAC-SHA256 서명 검증 */
+    const sig = req.get("x-hub-signature-256") || "";
+    const expected =
+      "sha256=" +
+      crypto.createHmac("sha256", DEPLOY_SECRET).update(req.body).digest("hex");
+    const valid =
+      sig.length === expected.length &&
+      crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+    if (!valid) return res.status(401).json({ error: "서명이 올바르지 않습니다." });
+
+    if (deploying) return res.json({ ok: true, msg: "이미 배포 진행 중" });
+    deploying = true;
+    res.json({ ok: true, msg: "배포 시작: pull → test → restart" });
+
+    /* 응답 후 비동기로 배포 수행 */
+    const log = (m) => console.log(`[deploy] ${m}`);
+    execFile("git", ["pull", "--ff-only"], { cwd: __dirname }, (e, out) => {
+      if (e) { log(`git pull 실패: ${e.message}`); deploying = false; return; }
+      log(`git pull 완료: ${out.trim().split("\n")[0]}`);
+      execFile("npm", ["test"], { cwd: __dirname, timeout: 120000 }, (e2, out2) => {
+        if (e2) {
+          log("npm test 실패 → 기존 버전 유지 (재시작 안 함)");
+          log(out2?.slice(-500) || e2.message);
+          deploying = false;
+          return;
+        }
+        log("테스트 전체 통과 → 새 코드로 재시작합니다");
+        setTimeout(() => process.exit(0), 500); // systemd가 자동 재기동
+      });
+    });
+  }
+);
+
 app.use(express.json({ limit: "15mb" })); // base64 이미지 포함 저장 허용
 
 /* ---------- 파일 저장소 헬퍼 ---------- */
