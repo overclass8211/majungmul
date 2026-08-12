@@ -1,0 +1,10 @@
+# 의존성
+node_modules/
+
+# 운영 데이터 (개인정보 포함 — 절대 커밋 금지)
+data/*.json
+
+# 로그 및 환경변수
+*.log
+.env
+nohup.out
